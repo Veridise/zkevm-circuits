@@ -13,8 +13,19 @@ use ethers::{
 use integration_tests::{
     get_client, get_provider, get_wallet
 };
+use halo2_proofs::{
+    arithmetic::{CurveAffine, Field, FieldExt},
+    dev::MockProver,
+    halo2curves::{
+        bn256::Fr,
+        group::{Curve, Group},
+    },
+};
 use bus_mapping::circuit_input_builder::BuilderClient;
+use bus_mapping::operation::OperationContainer;
 use zkevm_circuits::evm_circuit::{test::run_test_circuit, witness::block_convert};
+use zkevm_circuits::evm_circuit::witness::RwMap;
+use zkevm_circuits::state_circuit::StateCircuit;
 
 use std::fs;
 use std::env;
@@ -156,12 +167,40 @@ async fn run_blocks(fuzzed: &fuzzer::Fuzzed) {
     println!("{:?}", blocks_to_prove);
 
     for block_num in blocks_to_prove {
+        // Test EVM circuit block
         let block_cli = get_client();
         let builder_cli = BuilderClient::new(block_cli).await.unwrap();
         let (builder, _) = builder_cli.gen_inputs(block_num.as_u64()).await.unwrap();
         let block = block_convert(&builder.block, &builder.code_db);
         run_test_circuit(block).expect("evm_circuit verification failed");
-    }
+
+        // Test State circuit block
+        // TODO maybe we can reuse the builder
+        let cli = get_client();
+        let cli = BuilderClient::new(cli).await.unwrap();
+        let (builder, _) = cli.gen_inputs(block_num.as_u64()).await.unwrap();
+
+        // Generate state proof
+        let stack_ops = builder.block.container.sorted_stack();
+        let memory_ops = builder.block.container.sorted_memory();
+        let storage_ops = builder.block.container.sorted_storage();
+
+        const DEGREE: usize = 17;
+
+        let rw_map = RwMap::from(&OperationContainer {
+            memory: memory_ops,
+            stack: stack_ops,
+            storage: storage_ops,
+            ..Default::default()
+        });
+
+        let randomness = Fr::from(0xcafeu64);
+        let circuit = StateCircuit::<Fr>::new(randomness, rw_map, 1 << 16);
+        let power_of_randomness = circuit.instance();
+
+        let prover = MockProver::<Fr>::run(DEGREE as u32, &circuit, power_of_randomness).unwrap();
+        prover.verify().expect("state_circuit verification failed");
+        }
 }
 
 #[tokio::main]
