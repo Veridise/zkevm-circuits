@@ -250,6 +250,27 @@ async fn run_blocks(fuzzed: &fuzzer::Fuzzed) {
         let prover = MockProver::run(TX_DEGREE, &circuit, instance).unwrap();
 
         prover.verify().expect("tx_circuit verification failed");
+
+        // Test Bytecode circuit
+        const BYTECODE_DEGREE: u32 = 16;
+
+        let cli = get_client();
+        let cli = BuilderClient::new(cli).await.unwrap();
+        let (builder, _) = cli.gen_inputs(block_num.as_u64()).await.unwrap();
+        let bytecodes: Vec<Vec<u8>> = builder.code_db.0.values().cloned().collect();
+
+        test_bytecode_circuit::<Fr>(BYTECODE_DEGREE, bytecodes);
+
+        // Test Copy circuit
+        const COPY_DEGREE: u32 = 16;
+
+        log::info!("test copy circuit, block number: {}", block_num);
+        let cli = get_client();
+        let cli = BuilderClient::new(cli).await.unwrap();
+        let (builder, _) = cli.gen_inputs(block_num.as_u64()).await.unwrap();
+        let block = block_convert(&builder.block, &builder.code_db);
+
+        assert!(test_copy_circuit(COPY_DEGREE, block).is_ok());
     }
 }
 
