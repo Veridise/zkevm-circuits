@@ -13,6 +13,8 @@ use ethers::{
 use integration_tests::{
     get_client, get_provider, get_wallet
 };
+use bus_mapping::circuit_input_builder::BuilderClient;
+use zkevm_circuits::evm_circuit::{test::run_test_circuit, witness::block_convert};
 
 use std::fs;
 use std::env;
@@ -79,7 +81,10 @@ async fn run_blocks(fuzzed: &fuzzer::Fuzzed) {
 
     for block in blocks_sorted_by_number {
         // stop miner to add all transactions in a single block
-        //cli.miner_stop().await.expect("cannot stop miner");
+        cli.miner_stop().await.expect("cannot stop miner");
+        let mut pending_txs = Vec::new();
+        let mut block_errors = Vec::new();
+        let mut block_succeed = 0;
 
         for tx in block.get_transactions() {
             let from = addresses.get(tx.get_sender()).unwrap();
@@ -115,38 +120,41 @@ async fn run_blocks(fuzzed: &fuzzer::Fuzzed) {
             //println!("{:?}", tx_geth);
 
             // Submit the transaction and get any error
-            let mut err_msg = None;
-            let res = match prov.send_transaction(tx_geth, None).await {
+            let pending_tx = match prov.send_transaction(tx_geth, None).await {
                 Ok(r) => Some(r),
                 Err(err) => {
-                    err_msg = Some(format!("client error: {:?}", err));
+                    block_errors.push(format!("error: cannot send transaction: {:?}", err));
                     None
                 }
             };
-            if let Some(req) = res {
-                match req.await {
-                    Ok(_) => (),
-                    Err(err) => {
-                        err_msg = Some(format!("client error: {:?}", err));
-                    }
-                };
-            }
-
-            if let Some(msg) = err_msg {
-                println!("{}", msg);
-            } else {
-                // The transaction was successful
-                println!("Successfull transaction");
+            if let Some(p) = pending_tx {
+                pending_txs.push(p)
             }
         }
 
         // start miner
-        //cli.miner_start().await.expect("cannot start miner");
+        cli.miner_start().await.expect("cannot start miner");
+        for tx in pending_txs {
+            match tx.await {
+                Ok(_) => {
+                    block_succeed = block_succeed + 1;
+                    ()
+                },
+                Err(err) => {
+                    block_errors.push(format!("error: cannot confirm tx: {:?}", err));
+                    ()
+                },
+            };
+        }
+        println!("errors: {:?}", block_errors);
+        println!("succeed: {}", block_succeed);
 
         let block_num = prov.get_block_number().await.expect("cannot get block_num");
         blocks_to_prove.insert(block_num);
-        println!("{:?}", blocks_to_prove);
     }
+
+    println!("{:?}", blocks_to_prove);
+
 }
 
 #[tokio::main]
