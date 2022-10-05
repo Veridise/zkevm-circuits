@@ -1,3 +1,29 @@
+use bus_mapping::circuit_input_builder::BuilderClient;
+use bus_mapping::operation::OperationContainer;
+use eth_types::geth_types;
+use halo2_proofs::{
+    arithmetic::{CurveAffine, Field, FieldExt},
+    dev::MockProver,
+    halo2curves::{
+        bn256::Fr,
+        group::{Curve, Group},
+    },
+};
+use integration_tests::{get_client, log_init, GenDataOutput, CHAIN_ID};
+use lazy_static::lazy_static;
+use log::trace;
+use paste::paste;
+use rand_chacha::rand_core::SeedableRng;
+use rand_chacha::ChaCha20Rng;
+use std::marker::PhantomData;
+use zkevm_circuits::bytecode_circuit::dev::test_bytecode_circuit;
+use zkevm_circuits::copy_circuit::dev::test_copy_circuit;
+use zkevm_circuits::evm_circuit::witness::RwMap;
+use zkevm_circuits::evm_circuit::{test::run_test_circuit, witness::block_convert};
+use zkevm_circuits::state_circuit::StateCircuit;
+use zkevm_circuits::tx_circuit::{
+    sign_verify::SignVerifyChip, Secp256k1Affine, TxCircuit, POW_RAND_SIZE, VERIF_HEIGHT,
+};
 use ethers::{
     abi::{self, Tokenize},
     contract::{builders::ContractCall, Contract, ContractFactory},
@@ -11,21 +37,8 @@ use ethers::{
     signers::Signer,
 };
 use integration_tests::{
-    get_client, get_provider, get_wallet
+    get_provider, get_wallet
 };
-use halo2_proofs::{
-    arithmetic::{CurveAffine, Field, FieldExt},
-    dev::MockProver,
-    halo2curves::{
-        bn256::Fr,
-        group::{Curve, Group},
-    },
-};
-use bus_mapping::circuit_input_builder::BuilderClient;
-use bus_mapping::operation::OperationContainer;
-use zkevm_circuits::evm_circuit::{test::run_test_circuit, witness::block_convert};
-use zkevm_circuits::evm_circuit::witness::RwMap;
-use zkevm_circuits::state_circuit::StateCircuit;
 
 use std::fs;
 use std::env;
@@ -185,7 +198,7 @@ async fn run_blocks(fuzzed: &fuzzer::Fuzzed) {
         let memory_ops = builder.block.container.sorted_memory();
         let storage_ops = builder.block.container.sorted_storage();
 
-        const DEGREE: usize = 17;
+        const STATE_DEGREE: usize = 17;
 
         let rw_map = RwMap::from(&OperationContainer {
             memory: memory_ops,
@@ -198,9 +211,46 @@ async fn run_blocks(fuzzed: &fuzzer::Fuzzed) {
         let circuit = StateCircuit::<Fr>::new(randomness, rw_map, 1 << 16);
         let power_of_randomness = circuit.instance();
 
-        let prover = MockProver::<Fr>::run(DEGREE as u32, &circuit, power_of_randomness).unwrap();
+        let prover = MockProver::<Fr>::run(STATE_DEGREE as u32, &circuit, power_of_randomness).unwrap();
         prover.verify().expect("state_circuit verification failed");
-        }
+        
+        // Test tx circuit
+        const TX_DEGREE: u32 = 20;
+
+        let cli = get_client();
+        let cli = BuilderClient::new(cli).await.unwrap();
+
+        let (_, eth_block) = cli.gen_inputs(block_num.as_u64()).await.unwrap();
+        let txs: Vec<_> = eth_block
+            .transactions
+            .iter()
+            .map(geth_types::Transaction::from)
+            .collect();
+
+        let mut rng = ChaCha20Rng::seed_from_u64(2);
+        let aux_generator = <Secp256k1Affine as CurveAffine>::CurveExt::random(&mut rng).to_affine();
+
+        let randomness = Fr::random(&mut rng);
+        let mut instance: Vec<Vec<Fr>> = (1..POW_RAND_SIZE + 1)
+            .map(|exp| vec![randomness.pow(&[exp as u64, 0, 0, 0]); txs.len() * VERIF_HEIGHT])
+            .collect();
+
+        instance.push(vec![]);
+        let circuit = TxCircuit::<Fr, 4, { 4 * (4 + 32 + 32) }> {
+            sign_verify: SignVerifyChip {
+                aux_generator,
+                window_size: 2,
+                _marker: PhantomData,
+            },
+            randomness,
+            txs,
+            chain_id: CHAIN_ID,
+        };
+
+        let prover = MockProver::run(TX_DEGREE, &circuit, instance).unwrap();
+
+        prover.verify().expect("tx_circuit verification failed");
+    }
 }
 
 #[tokio::main]
