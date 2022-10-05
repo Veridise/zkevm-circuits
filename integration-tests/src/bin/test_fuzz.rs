@@ -155,6 +155,13 @@ async fn run_blocks(fuzzed: &fuzzer::Fuzzed) {
 
     println!("{:?}", blocks_to_prove);
 
+    for block_num in blocks_to_prove {
+        let block_cli = get_client();
+        let builder_cli = BuilderClient::new(block_cli).await.unwrap();
+        let (builder, _) = builder_cli.gen_inputs(block_num.as_u64()).await.unwrap();
+        let block = block_convert(&builder.block, &builder.code_db);
+        run_test_circuit(block).expect("evm_circuit verification failed");
+    }
 }
 
 #[tokio::main]
