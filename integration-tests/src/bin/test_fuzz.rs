@@ -9,10 +9,7 @@ use halo2_proofs::{
         group::{Curve, Group},
     },
 };
-use integration_tests::{get_client, log_init, GenDataOutput, CHAIN_ID};
-use lazy_static::lazy_static;
-use log::trace;
-use paste::paste;
+use integration_tests::{get_client, CHAIN_ID};
 use rand_chacha::rand_core::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use std::marker::PhantomData;
@@ -25,15 +22,8 @@ use zkevm_circuits::tx_circuit::{
     sign_verify::SignVerifyChip, Secp256k1Affine, TxCircuit, POW_RAND_SIZE, VERIF_HEIGHT,
 };
 use ethers::{
-    abi::{self, Tokenize},
-    contract::{builders::ContractCall, Contract, ContractFactory},
-    core::types::{
-        transaction::eip2718::TypedTransaction, Address, TransactionReceipt, TransactionRequest,
-        U256, U64, Bytes
-    },
-    core::utils::WEI_IN_ETHER,
-    middleware::SignerMiddleware,
-    providers::{Middleware, PendingTransaction},
+    core::types::{TransactionRequest, Bytes},
+    providers::Middleware,
     signers::Signer,
 };
 use integration_tests::{
@@ -44,9 +34,12 @@ use std::fs;
 use std::env;
 use std::thread::sleep;
 use std::time::Duration;
+use std::fs::metadata;
+use std::collections::{HashMap, HashSet};
+use log::{info, debug};
+use env_logger::Env;
 
 use protobuf;
-use std::collections::{HashMap, HashSet};
 
 mod fuzzer;
 
@@ -61,10 +54,113 @@ pub fn convert_to_proto(fuzz_data: &[u8]) -> Option<fuzzer::Fuzzed> {
     }
 }
 
-async fn run_blocks(fuzzed: &fuzzer::Fuzzed) {
+async fn prove_evm_circuit(block_number: u64) {
+    let block_cli = get_client();
+    let builder_cli = BuilderClient::new(block_cli).await.unwrap();
+    let (builder, _) = builder_cli.gen_inputs(block_number).await.unwrap();
+    let block = block_convert(&builder.block, &builder.code_db);
+    run_test_circuit(block).expect("evm_circuit verification failed");
+}
+
+async fn prove_state_circuit(block_number: u64) {
+    let cli = get_client();
+    let cli = BuilderClient::new(cli).await.unwrap();
+    let (builder, _) = cli.gen_inputs(block_number).await.unwrap();
+
+    // Generate state proof
+    let stack_ops = builder.block.container.sorted_stack();
+    let memory_ops = builder.block.container.sorted_memory();
+    let storage_ops = builder.block.container.sorted_storage();
+
+    const STATE_DEGREE: usize = 17;
+
+    let rw_map = RwMap::from(&OperationContainer {
+        memory: memory_ops,
+        stack: stack_ops,
+        storage: storage_ops,
+        ..Default::default()
+    });
+
+    let randomness = Fr::from(0xcafeu64);
+    let circuit = StateCircuit::<Fr>::new(randomness, rw_map, 1 << 16);
+    let power_of_randomness = circuit.instance();
+
+    let prover = MockProver::<Fr>::run(STATE_DEGREE as u32, &circuit, power_of_randomness).unwrap();
+    prover.verify().expect("state_circuit verification failed");
+}
+
+async fn prove_tx_circuit(block_number: u64) {
+    const TX_DEGREE: u32 = 20;
+
+    let cli = get_client();
+    let cli = BuilderClient::new(cli).await.unwrap();
+
+    let (_, eth_block) = cli.gen_inputs(block_number).await.unwrap();
+    let txs: Vec<_> = eth_block
+        .transactions
+        .iter()
+        .map(geth_types::Transaction::from)
+        .collect();
+
+    let mut rng = ChaCha20Rng::seed_from_u64(2);
+    let aux_generator = <Secp256k1Affine as CurveAffine>::CurveExt::random(&mut rng).to_affine();
+
+    let randomness = Fr::random(&mut rng);
+    let mut instance: Vec<Vec<Fr>> = (1..POW_RAND_SIZE + 1)
+        .map(|exp| vec![randomness.pow(&[exp as u64, 0, 0, 0]); txs.len() * VERIF_HEIGHT])
+        .collect();
+
+    instance.push(vec![]);
+    let circuit = TxCircuit::<Fr, 4, { 4 * (4 + 32 + 32) }> {
+        sign_verify: SignVerifyChip {
+            aux_generator,
+            window_size: 2,
+            _marker: PhantomData,
+        },
+        randomness,
+        txs,
+        chain_id: CHAIN_ID,
+    };
+
+    let prover = MockProver::run(TX_DEGREE, &circuit, instance).unwrap();
+
+    prover.verify().expect("tx_circuit verification failed");
+}
+
+async fn prove_bytecode_circuit(block_number: u64) {
+    const BYTECODE_DEGREE: u32 = 16;
+
+    let cli = get_client();
+    let cli = BuilderClient::new(cli).await.unwrap();
+    let (builder, _) = cli.gen_inputs(block_number).await.unwrap();
+    let bytecodes: Vec<Vec<u8>> = builder.code_db.0.values().cloned().collect();
+    test_bytecode_circuit::<Fr>(BYTECODE_DEGREE, bytecodes);
+}
+
+async fn prove_copy_circuit(block_number: u64) {
+    const COPY_DEGREE: u32 = 16;
+
+    let cli = get_client();
+    let cli = BuilderClient::new(cli).await.unwrap();
+    let (builder, _) = cli.gen_inputs(block_number).await.unwrap();
+    let block = block_convert(&builder.block, &builder.code_db);
+
+    assert!(test_copy_circuit(COPY_DEGREE, block).is_ok());
+}
+
+// we need info level logging but not always
+fn debug_log(msg: &str, debug: bool) {
+    if debug {
+        info!("{}", msg);
+    }
+}
+
+async fn run_blocks(fuzzed: &fuzzer::Fuzzed, debug: bool) {
     // connect to geth
     let cli = get_client();
     let prov = get_provider();
+
+    debug_log("- Connect to geth", debug);
 
     // Wait for geth to be online.
     loop {
@@ -103,14 +199,18 @@ async fn run_blocks(fuzzed: &fuzzer::Fuzzed) {
     let mut blocks_sorted_by_number = fuzzed.get_blocks().to_vec();
     blocks_sorted_by_number.sort_by(|a, b| a.get_number().cmp(&b.get_number()));
 
+    debug_log("- Processing Blocks", debug);
     for block in blocks_sorted_by_number {
+        debug_log(&format!("---- Block: {:?}", block.get_number()), debug);
         // stop miner to add all transactions in a single block
         cli.miner_stop().await.expect("cannot stop miner");
         let mut pending_txs = Vec::new();
         let mut block_errors = Vec::new();
         let mut block_succeed = 0;
 
+        debug_log("---- Processing Transactions", debug);
         for tx in block.get_transactions() {
+            debug_log(&format!("-------- TX: {:?}", tx), debug);
             let from = addresses.get(tx.get_sender()).unwrap();
             let data;
 
@@ -158,6 +258,7 @@ async fn run_blocks(fuzzed: &fuzzer::Fuzzed) {
 
         // start miner
         cli.miner_start().await.expect("cannot start miner");
+        debug_log("---- Mine transactions", debug);
         for tx in pending_txs {
             match tx.await {
                 Ok(_) => {
@@ -170,118 +271,77 @@ async fn run_blocks(fuzzed: &fuzzer::Fuzzed) {
                 },
             };
         }
-        println!("errors: {:?}", block_errors);
-        println!("succeed: {}", block_succeed);
+        debug_log(&format!("---- Errors: {:?}", block_errors), debug);
+        debug_log(&format!("---- Succeed: {}", block_succeed), debug);
 
         let block_num = prov.get_block_number().await.expect("cannot get block_num");
         blocks_to_prove.insert(block_num);
     }
 
-    println!("{:?}", blocks_to_prove);
+    debug_log(&format!("- Blocks to prove: {:?}", blocks_to_prove), debug);
 
     for block_num in blocks_to_prove {
+        debug_log(&format!("---- Block: {:?}", block_num), debug);
         // Test EVM circuit block
-        let block_cli = get_client();
-        let builder_cli = BuilderClient::new(block_cli).await.unwrap();
-        let (builder, _) = builder_cli.gen_inputs(block_num.as_u64()).await.unwrap();
-        let block = block_convert(&builder.block, &builder.code_db);
-        run_test_circuit(block).expect("evm_circuit verification failed");
+        info!("-------- Prove EVM circuit");
+        prove_evm_circuit(block_num.as_u64()).await;
 
         // Test State circuit block
-        // TODO maybe we can reuse the builder
-        let cli = get_client();
-        let cli = BuilderClient::new(cli).await.unwrap();
-        let (builder, _) = cli.gen_inputs(block_num.as_u64()).await.unwrap();
-
-        // Generate state proof
-        let stack_ops = builder.block.container.sorted_stack();
-        let memory_ops = builder.block.container.sorted_memory();
-        let storage_ops = builder.block.container.sorted_storage();
-
-        const STATE_DEGREE: usize = 17;
-
-        let rw_map = RwMap::from(&OperationContainer {
-            memory: memory_ops,
-            stack: stack_ops,
-            storage: storage_ops,
-            ..Default::default()
-        });
-
-        let randomness = Fr::from(0xcafeu64);
-        let circuit = StateCircuit::<Fr>::new(randomness, rw_map, 1 << 16);
-        let power_of_randomness = circuit.instance();
-
-        let prover = MockProver::<Fr>::run(STATE_DEGREE as u32, &circuit, power_of_randomness).unwrap();
-        prover.verify().expect("state_circuit verification failed");
+        info!("-------- Prove State circuit");
+        prove_state_circuit(block_num.as_u64()).await;
         
         // Test tx circuit
-        const TX_DEGREE: u32 = 20;
-
-        let cli = get_client();
-        let cli = BuilderClient::new(cli).await.unwrap();
-
-        let (_, eth_block) = cli.gen_inputs(block_num.as_u64()).await.unwrap();
-        let txs: Vec<_> = eth_block
-            .transactions
-            .iter()
-            .map(geth_types::Transaction::from)
-            .collect();
-
-        let mut rng = ChaCha20Rng::seed_from_u64(2);
-        let aux_generator = <Secp256k1Affine as CurveAffine>::CurveExt::random(&mut rng).to_affine();
-
-        let randomness = Fr::random(&mut rng);
-        let mut instance: Vec<Vec<Fr>> = (1..POW_RAND_SIZE + 1)
-            .map(|exp| vec![randomness.pow(&[exp as u64, 0, 0, 0]); txs.len() * VERIF_HEIGHT])
-            .collect();
-
-        instance.push(vec![]);
-        let circuit = TxCircuit::<Fr, 4, { 4 * (4 + 32 + 32) }> {
-            sign_verify: SignVerifyChip {
-                aux_generator,
-                window_size: 2,
-                _marker: PhantomData,
-            },
-            randomness,
-            txs,
-            chain_id: CHAIN_ID,
-        };
-
-        let prover = MockProver::run(TX_DEGREE, &circuit, instance).unwrap();
-
-        prover.verify().expect("tx_circuit verification failed");
+        info!("-------- Prove TX circuit");
+        prove_tx_circuit(block_num.as_u64()).await;
 
         // Test Bytecode circuit
-        const BYTECODE_DEGREE: u32 = 16;
-
-        let cli = get_client();
-        let cli = BuilderClient::new(cli).await.unwrap();
-        let (builder, _) = cli.gen_inputs(block_num.as_u64()).await.unwrap();
-        let bytecodes: Vec<Vec<u8>> = builder.code_db.0.values().cloned().collect();
-
-        test_bytecode_circuit::<Fr>(BYTECODE_DEGREE, bytecodes);
+        info!("-------- Prove Bytecode circuit");
+        prove_bytecode_circuit(block_num.as_u64()).await;
 
         // Test Copy circuit
-        const COPY_DEGREE: u32 = 16;
-
-        log::info!("test copy circuit, block number: {}", block_num);
-        let cli = get_client();
-        let cli = BuilderClient::new(cli).await.unwrap();
-        let (builder, _) = cli.gen_inputs(block_num.as_u64()).await.unwrap();
-        let block = block_convert(&builder.block, &builder.code_db);
-
-        assert!(test_copy_circuit(COPY_DEGREE, block).is_ok());
+        info!("-------- Prove Copy circuit");
+        prove_copy_circuit(block_num.as_u64()).await;
     }
 }
 
 #[tokio::main]
 async fn main() {
+    env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
     let args: Vec<String> = env::args().collect();
-    let data = fs::read(args[1].clone()).expect("Unable to read file");
-    match convert_to_proto(&data) {
-        Some(proto) => {
-            run_blocks(&proto).await;
-        },
-        None => (),
+    if args.len() < 2{
+        panic!("usage: cargo run --bin test_fuzz PATH");
+    }
+    let filepath = args[1].clone();
+    let md = metadata(&filepath);
+    let path = match md {
+        Ok(path) => path,
+        Err(error) => panic!("Path does not exist: {:?}", error),
+    };  
+    if path.is_dir() {
+        info!("Processing directory: {}", filepath);
+        let files = fs::read_dir(&filepath).unwrap();
+        let mut counter = 0;
+        for file in files {
+            let childer_filepath = file.unwrap().path();
+            info!("Processing: {}", &childer_filepath.to_str().unwrap());
+            counter = counter + 1;
+            let data = fs::read(&childer_filepath).expect("Unable to read file");
+            match convert_to_proto(&data) {
+                Some(proto) => {
+                    run_blocks(&proto, false).await;
+                },
+                None => (),
+            }
+        }
+        info!("Total files processed: {}", counter);
+    } else if path.is_file() {
+        info!("Processing file: {}", filepath);
+        let data = fs::read(&filepath).expect("Unable to read file");
+        match convert_to_proto(&data) {
+            Some(proto) => {
+                run_blocks(&proto, true).await;
+            },
+            None => (),
+        }
     }
 }

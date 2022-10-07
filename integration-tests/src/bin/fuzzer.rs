@@ -1995,3 +1995,5 @@ pub fn file_descriptor_proto() -> &'static ::protobuf::descriptor::FileDescripto
         parse_descriptor_proto()
     })
 }
+
+pub fn main() {}
