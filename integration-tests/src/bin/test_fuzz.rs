@@ -155,7 +155,7 @@ fn debug_log(msg: &str, debug: bool) {
     }
 }
 
-async fn run_blocks(fuzzed: &fuzzer::Fuzzed, debug: bool) {
+async fn run_blocks(fuzzed: &fuzzer::Fuzzed, phase: &str, debug: bool) {
     // connect to geth
     let cli = get_client();
     let prov = get_provider();
@@ -283,24 +283,34 @@ async fn run_blocks(fuzzed: &fuzzer::Fuzzed, debug: bool) {
     for block_num in blocks_to_prove {
         debug_log(&format!("---- Block: {:?}", block_num), debug);
         // Test EVM circuit block
-        info!("-------- Prove EVM circuit");
-        prove_evm_circuit(block_num.as_u64()).await;
+        if phase == "" || phase == "evm" {
+            info!("-------- Prove EVM circuit");
+            prove_evm_circuit(block_num.as_u64()).await;
+        }
 
         // Test State circuit block
-        info!("-------- Prove State circuit");
-        prove_state_circuit(block_num.as_u64()).await;
+        if phase == "" || phase == "state" {
+            info!("-------- Prove State circuit");
+            prove_state_circuit(block_num.as_u64()).await;
+        }
         
         // Test tx circuit
-        info!("-------- Prove TX circuit");
-        prove_tx_circuit(block_num.as_u64()).await;
+        if phase == "" || phase == "tx" {
+            info!("-------- Prove TX circuit");
+            prove_tx_circuit(block_num.as_u64()).await;
+        }
 
         // Test Bytecode circuit
-        info!("-------- Prove Bytecode circuit");
-        prove_bytecode_circuit(block_num.as_u64()).await;
+        if phase == "" || phase == "bytecode" {
+            info!("-------- Prove Bytecode circuit");
+            prove_bytecode_circuit(block_num.as_u64()).await;
+        }
 
         // Test Copy circuit
-        info!("-------- Prove Copy circuit");
-        prove_copy_circuit(block_num.as_u64()).await;
+        if phase == "" || phase == "copy" {
+            info!("-------- Prove Copy circuit");
+            prove_copy_circuit(block_num.as_u64()).await;
+        }
     }
 }
 
@@ -309,7 +319,11 @@ async fn main() {
     env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
     let args: Vec<String> = env::args().collect();
     if args.len() < 2{
-        panic!("usage: cargo run --bin test_fuzz PATH");
+        panic!("usage: cargo run --bin test_fuzz PATH [evm|state|tx|bytecode|copy]");
+    }
+    let mut phase = "";
+    if args.len() == 3 {
+        phase = &args[2];
     }
     let filepath = args[1].clone();
     let md = metadata(&filepath);
@@ -328,7 +342,7 @@ async fn main() {
             let data = fs::read(&childer_filepath).expect("Unable to read file");
             match convert_to_proto(&data) {
                 Some(proto) => {
-                    run_blocks(&proto, false).await;
+                    run_blocks(&proto, phase, false).await;
                 },
                 None => (),
             }
@@ -339,7 +353,7 @@ async fn main() {
         let data = fs::read(&filepath).expect("Unable to read file");
         match convert_to_proto(&data) {
             Some(proto) => {
-                run_blocks(&proto, true).await;
+                run_blocks(&proto, phase, false).await;
             },
             None => (),
         }
