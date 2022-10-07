@@ -1,0 +1,6 @@
+cargo run --bin test_fuzz failing_test_cases/043e580719e141e9ff9d34d5a51f5bc2abb6354e state -- state_circuit verification failed: ConstraintNotSatisfied 
+cargo run --bin test_fuzz failing_test_cases/00267e0268e1338d297a72240711c5aa92898a93 tx    -- 'called `Option::unwrap()` on a `None` value', eth-types/src/geth_types.rs:179:23
+cargo run --bin test_fuzz failing_test_cases/00267e0268e1338d297a72240711c5aa92898a93 evm   -- 'index out of bounds: the len is 9 but the index is 9', zkevm-circuits/src/evm_circuit/execution/begin_tx.rs:241:54
+cargo run --bin test_fuzz failing_test_cases/00064e735ce5e50974a6ba46e6849a6465dcc0c6 evm   -- 'index out of bounds: the len is 10 but the index is 10', zkevm-circuits/src/evm_circuit/execution.rs:1114:26
+cargo run --bin test_fuzz failing_test_cases/0224e759d8f1e129f6c30f8a086575b7af705bdd evm   -- 'Integer overflow when casting to u64', /home/sh/.cargo/registry/src/github.com-1ecc6299db9ec823/primitive-types-0.11.1/src/lib.rs:38:1
+cargo run --bin test_fuzz failing_test_cases/01a58d8e65931392994615ee66383733cbe72a82 evm   -- 'Integer overflow when casting to usize', /home/sh/.cargo/registry/src/github.com-1ecc6299db9ec823/primitive-types-0.11.1/src/lib.rs:38:1
