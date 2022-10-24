@@ -22,6 +22,7 @@
 /// Generated files are compatible only with the same version
 /// of protobuf runtime.
 // const _PROTOBUF_VERSION_CHECK: () = ::protobuf::VERSION_2_28_0;
+use protobuf;
 
 #[derive(PartialEq,Clone,Default)]
 pub struct Fuzzed {
@@ -1996,4 +1997,9 @@ pub fn file_descriptor_proto() -> &'static ::protobuf::descriptor::FileDescripto
     })
 }
 
-pub fn main() {}
+pub fn convert_to_proto(fuzz_data: &[u8]) -> Option<Fuzzed> {
+    match protobuf::parse_from_bytes::<Fuzzed>(fuzz_data) {
+        Ok(fuzzed) => Some(fuzzed),
+        Err(_) => None,
+    }
+}

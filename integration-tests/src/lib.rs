@@ -22,6 +22,8 @@ use std::sync::Once;
 use std::time::Duration;
 use url::Url;
 
+pub mod fuzzer;
+
 /// Geth dev chain ID
 pub const CHAIN_ID: u64 = 1337;
 /// Path to the test contracts

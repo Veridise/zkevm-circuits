@@ -9,7 +9,7 @@ use halo2_proofs::{
         group::{Curve, Group},
     },
 };
-use integration_tests::{get_client, CHAIN_ID};
+use integration_tests::{get_client, CHAIN_ID, fuzzer::convert_to_proto, fuzzer::Fuzzed};
 use rand_chacha::rand_core::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use std::marker::PhantomData;
@@ -39,20 +39,9 @@ use std::collections::{HashMap, HashSet};
 use log::{info, debug};
 use env_logger::Env;
 
-use protobuf;
-
-mod fuzzer;
-
 
 static GENESIS_ADDRESS: &str = "2adc25665018aa1fe0e6bc666dac8fc2697ff9ba";
 
-
-pub fn convert_to_proto(fuzz_data: &[u8]) -> Option<fuzzer::Fuzzed> {
-    match protobuf::parse_from_bytes::<fuzzer::Fuzzed>(fuzz_data) {
-        Ok(fuzzed) => Some(fuzzed),
-        Err(_) => None,
-    }
-}
 
 async fn prove_evm_circuit(block_number: u64) {
     let block_cli = get_client();
@@ -148,7 +137,7 @@ fn debug_log(msg: &str, debug: bool) {
     }
 }
 
-async fn run_blocks(fuzzed: &fuzzer::Fuzzed, phase: &str, debug: bool) {
+async fn run_blocks(fuzzed: &Fuzzed, phase: &str, debug: bool) {
     // connect to geth
     let cli = get_client();
     let prov = get_provider();
