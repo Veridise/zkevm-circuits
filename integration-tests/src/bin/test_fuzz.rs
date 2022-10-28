@@ -1,26 +1,4 @@
-use bus_mapping::circuit_input_builder::BuilderClient;
-use bus_mapping::operation::OperationContainer;
-use eth_types::geth_types;
-use halo2_proofs::{
-    arithmetic::CurveAffine,
-    dev::MockProver,
-    halo2curves::{
-        bn256::Fr,
-        group::{Curve, Group},
-    },
-};
-use integration_tests::{get_client, CHAIN_ID, fuzzer::convert_to_proto, fuzzer::Fuzzed};
-use rand_chacha::rand_core::SeedableRng;
-use rand_chacha::ChaCha20Rng;
-use std::marker::PhantomData;
-use zkevm_circuits::bytecode_circuit::dev::test_bytecode_circuit;
-use zkevm_circuits::copy_circuit::dev::test_copy_circuit;
-use zkevm_circuits::evm_circuit::witness::RwMap;
-use zkevm_circuits::evm_circuit::{test::run_test_circuit, witness::block_convert};
-use zkevm_circuits::state_circuit::StateCircuit;
-use zkevm_circuits::tx_circuit::{
-    sign_verify::SignVerifyChip, Secp256k1Affine, TxCircuit
-};
+use integration_tests::{get_client, fuzzer::convert_to_proto, fuzzer::Fuzzed, provers};
 use ethers::{
     core::types::{TransactionRequest, Bytes},
     providers::Middleware,
@@ -42,93 +20,6 @@ use env_logger::Env;
 
 static GENESIS_ADDRESS: &str = "2adc25665018aa1fe0e6bc666dac8fc2697ff9ba";
 
-
-async fn prove_evm_circuit(block_number: u64) {
-    let block_cli = get_client();
-    let builder_cli = BuilderClient::new(block_cli).await.unwrap();
-    let (builder, _) = builder_cli.gen_inputs(block_number).await.unwrap();
-    let block = block_convert(&builder.block, &builder.code_db);
-    run_test_circuit(block).expect("evm_circuit verification failed");
-}
-
-async fn prove_state_circuit(block_number: u64) {
-    let cli = get_client();
-    let cli = BuilderClient::new(cli).await.unwrap();
-    let (builder, _) = cli.gen_inputs(block_number).await.unwrap();
-
-    // Generate state proof
-    let stack_ops = builder.block.container.sorted_stack();
-    let memory_ops = builder.block.container.sorted_memory();
-    let storage_ops = builder.block.container.sorted_storage();
-
-    const STATE_DEGREE: usize = 17;
-
-    let rw_map = RwMap::from(&OperationContainer {
-        memory: memory_ops,
-        stack: stack_ops,
-        storage: storage_ops,
-        ..Default::default()
-    });
-
-    let randomness = Fr::from(0xcafeu64);
-    let circuit = StateCircuit::<Fr>::new(randomness, rw_map, 1 << 16);
-    let power_of_randomness = circuit.instance();
-
-    let prover = MockProver::<Fr>::run(STATE_DEGREE as u32, &circuit, power_of_randomness).unwrap();
-    prover.verify().expect("state_circuit verification failed");
-}
-
-async fn prove_tx_circuit(block_number: u64) {
-    const TX_DEGREE: u32 = 20;
-
-    let cli = get_client();
-    let cli = BuilderClient::new(cli).await.unwrap();
-
-    let (_, eth_block) = cli.gen_inputs(block_number).await.unwrap();
-    let txs: Vec<_> = eth_block
-        .transactions
-        .iter()
-        .map(geth_types::Transaction::from)
-        .collect();
-
-    let mut rng = ChaCha20Rng::seed_from_u64(2);
-    let aux_generator = <Secp256k1Affine as CurveAffine>::CurveExt::random(&mut rng).to_affine();
-
-    let circuit = TxCircuit::<Fr, 4, { 4 * (4 + 32 + 32) }> {
-        sign_verify: SignVerifyChip {
-            aux_generator,
-            window_size: 2,
-            _marker: PhantomData,
-        },
-        txs,
-        chain_id: CHAIN_ID,
-    };
-
-    let prover = MockProver::run(TX_DEGREE, &circuit, vec![vec![]]).unwrap();
-
-    prover.verify().expect("tx_circuit verification failed");
-}
-
-async fn prove_bytecode_circuit(block_number: u64) {
-    const BYTECODE_DEGREE: u32 = 16;
-
-    let cli = get_client();
-    let cli = BuilderClient::new(cli).await.unwrap();
-    let (builder, _) = cli.gen_inputs(block_number).await.unwrap();
-    let bytecodes: Vec<Vec<u8>> = builder.code_db.0.values().cloned().collect();
-    test_bytecode_circuit::<Fr>(BYTECODE_DEGREE, bytecodes);
-}
-
-async fn prove_copy_circuit(block_number: u64) {
-    const COPY_DEGREE: u32 = 16;
-
-    let cli = get_client();
-    let cli = BuilderClient::new(cli).await.unwrap();
-    let (builder, _) = cli.gen_inputs(block_number).await.unwrap();
-    let block = block_convert(&builder.block, &builder.code_db);
-
-    assert!(test_copy_circuit(COPY_DEGREE, block).is_ok());
-}
 
 // we need info level logging but not always
 fn debug_log(msg: &str, debug: bool) {
@@ -267,31 +158,31 @@ async fn run_blocks(fuzzed: &Fuzzed, phase: &str, debug: bool) {
         // Test EVM circuit block
         if phase == "" || phase == "evm" {
             info!("-------- Prove EVM circuit");
-            prove_evm_circuit(block_num.as_u64()).await;
+            provers::prove_evm_circuit(block_num.as_u64()).await;
         }
 
         // Test State circuit block
         if phase == "" || phase == "state" {
             info!("-------- Prove State circuit");
-            prove_state_circuit(block_num.as_u64()).await;
+            provers::prove_state_circuit(block_num.as_u64()).await;
         }
         
         // Test tx circuit
         if phase == "" || phase == "tx" {
             info!("-------- Prove TX circuit");
-            prove_tx_circuit(block_num.as_u64()).await;
+            provers::prove_tx_circuit(block_num.as_u64()).await;
         }
 
         // Test Bytecode circuit
         if phase == "" || phase == "bytecode" {
             info!("-------- Prove Bytecode circuit");
-            prove_bytecode_circuit(block_num.as_u64()).await;
+            provers::prove_bytecode_circuit(block_num.as_u64()).await;
         }
 
         // Test Copy circuit
         if phase == "" || phase == "copy" {
             info!("-------- Prove Copy circuit");
-            prove_copy_circuit(block_num.as_u64()).await;
+            provers::prove_copy_circuit(block_num.as_u64()).await;
         }
     }
 }
