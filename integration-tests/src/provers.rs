@@ -1,5 +1,5 @@
 //! ZKEVM provers
-use bus_mapping::circuit_input_builder::{BuilderClient, CircuitInputBuilder};
+use bus_mapping::circuit_input_builder::{BuilderClient, CircuitInputBuilder, CircuitsParams};
 use bus_mapping::operation::OperationContainer;
 use zkevm_circuits::bytecode_circuit::dev::test_bytecode_circuit;
 use zkevm_circuits::copy_circuit::dev::test_copy_circuit;
@@ -25,10 +25,15 @@ use halo2_proofs::{
 use crate::get_client;
 use crate::CHAIN_ID;
 
+const CIRCUITS_PARAMS: CircuitsParams = CircuitsParams {
+    max_rws: 16384,
+    max_txs: 4,
+};
+
 ///Get builder
 pub async fn get_builder(block_number: u64) -> (CircuitInputBuilder, eth_types::Block<eth_types::Transaction>) {
     let block_cli = get_client();
-    let builder_cli = BuilderClient::new(block_cli).await.unwrap();
+    let builder_cli = BuilderClient::new(block_cli, CIRCUITS_PARAMS).await.unwrap();
     let (builder, eth_block) = builder_cli.gen_inputs(block_number).await.unwrap();
     return (builder, eth_block);
 }
